@@ -11,6 +11,7 @@ icon.filename = %(source.dir)s/assets/images/icon.png
 
 # pygame = python-for-android's own SDL2 pygame recipe (don't pin a version, the pinned 2.5.1 doesn't exist there)
 requirements = python3,pygame,pyjnius
+p4a.branch = v2023.09.16
 orientation = landscape
 fullscreen = 1
 
