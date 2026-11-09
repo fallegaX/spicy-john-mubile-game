@@ -5,7 +5,7 @@ Imported lazily by full_game.py, after full_game's own classes exist.
 import math, random, time, threading
 import pygame
 import full_game as G
-from full_game import (Scene, EndScene, W, H, FPS, text, font, nfont, panel, rrect, bg_cover, ch_cover, audio, clamp,
+from full_game import (dim as _dim, bg_dim as _bg_dim, Scene, EndScene, W, H, FPS, text, font, nfont, panel, rrect, bg_cover, ch_cover, audio, clamp,
                        GOLD, WHITE, BLACK, P_COL, CHAPTERS, STATS, hero_anim, FightScene, MenuScene, settings, save_settings)
 import netplay
 
@@ -75,8 +75,7 @@ class OnlineScene(Scene):
     def back(self): pass
 
     def draw_bg(self, surf, dim=165):
-        surf.blit(self.bg, (0, 0))
-        d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, dim)); surf.blit(d, (0, 0))
+        _bg_dim(surf, self.bg, dim)
 
     def draw_btns(self, surf):
         for i, b in enumerate(self.btns):
@@ -444,7 +443,7 @@ class NetResultScene(EndScene):
 
     def draw(self, surf):
         f = self.f; k = clamp(self.t / 25, 0, 1)
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 150)); surf.blit(d, (0, 0))
+        _bg_dim(surf, self.bg, 150)
         if self.kind == "vs":
             w = f.vs_winner; col = P_COL[w + 1]
             text(surf, "PLAYER %d WINS!" % (w + 1), font(int(170 * (.7 + .3 * k))), col, (W // 2, 230), "center", alpha=int(255 * k), outline=8)
@@ -470,7 +469,7 @@ class NetMessageScene(EndScene):
     def update(self): self.t += 1
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 170)); surf.blit(d, (0, 0))
+        _bg_dim(surf, self.bg, 170)
         text(surf, "DISCONNECTED", font(110), (230, 80, 70), (W // 2, 320), "center", outline=6)
         text(surf, self.msg, font(52), WHITE, (W // 2, 500), "center", outline=4)
         self.draw_buttons(surf)

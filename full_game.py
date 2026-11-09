@@ -59,6 +59,15 @@ except Exception:
     pass
 
 
+if "low" not in settings:
+    settings["low"] = bool(os.environ.get("ANDROID_ARGUMENT"))      # phones start in LOW graphics
+
+
+def low():
+    """LOW graphics: 30 fps drawing, no full-screen effects, cheaper particles (logic still runs at 60 Hz)"""
+    return settings.get("low", False)
+
+
 def save_settings():
     try:
         with open(SETTINGS_FILE, "w") as f:
@@ -134,6 +143,29 @@ def nfont(size, bold=False):
     if k not in _fonts_n:
         _fonts_n[k] = pygame.font.SysFont("arial,dejavusans,liberationsans", size, bold=bold)
     return _fonts_n[k]
+
+
+_dim_cache = {}; _bgdim_cache = {}
+
+
+def dim(surf, alpha):
+    """darken the whole screen with a cached overlay (no per-frame allocation)"""
+    o = _dim_cache.get("black")
+    if o is None:
+        o = _dim_cache["black"] = pygame.Surface((W, H), pygame.SRCALPHA); o.fill((0, 0, 0, 255))
+    o.set_alpha(int(clamp(alpha, 0, 255))); surf.blit(o, (0, 0))
+
+
+def bg_dim(surf, bg, alpha):
+    """background picture + darkening, baked ONCE into one opaque surface"""
+    k = (id(bg), alpha)
+    ent = _bgdim_cache.get(k)
+    if ent is None:
+        if len(_bgdim_cache) > 5: _bgdim_cache.clear()
+        b = pygame.Surface((W, H)); b.blit(bg, (0, 0))
+        o = pygame.Surface((W, H), pygame.SRCALPHA); o.fill((0, 0, 0, alpha)); b.blit(o, (0, 0))
+        ent = _bgdim_cache[k] = (b.convert(), bg)
+    surf.blit(ent[0], (0, 0))
 
 
 _text_cache = {}
@@ -476,10 +508,14 @@ class Effects:
             if self.zoom_kick < 0.002: self.zoom_kick = 0.0
 
     def draw_world(self, surf, cam):
+        LO = low()
         for r in self.rings:
             x, y, r0, r1, life, mx, col, wd, flat = r
             t = 1 - life / mx; rad = lerp(r0, r1, 1 - (1 - t) ** 2)
             rect = pygame.Rect(0, 0, rad * 2, rad * 2 * flat); rect.center = (x - cam, y)
+            if LO:
+                if rect.w > 4 and rect.h > 4: pygame.draw.ellipse(surf, col, rect, max(2, int(wd * (1 - t))))
+                continue
             ring = pygame.Surface((rect.w + 4, rect.h + 4), pygame.SRCALPHA)
             pygame.draw.ellipse(ring, (*col, int(230 * (1 - t))), ring.get_rect(), max(2, int(wd * (1 - t))))
             surf.blit(ring, (rect.x - 2, rect.y - 2))
@@ -495,14 +531,18 @@ class Effects:
                 po.append((math.cos(a) * R, math.sin(a) * R))
                 pi_.append((math.cos(a) * R * 0.74 - R * 0.14, math.sin(a) * R * 0.74))
             S = int(R * 2.4); c0 = S // 2
+            if LO:
+                pts = [(x - cam - c0 + c0 + px * face, y - c0 + c0 + py) for px, py in po + pi_[::-1]]
+                pygame.draw.polygon(surf, col, pts); continue
             tmp = pygame.Surface((S, S), pygame.SRCALPHA)
             al = int(235 * max(0.0, 1 - prog) ** 0.7)
             pts = [(c0 + px * face, c0 + py) for px, py in po + pi_[::-1]]
             pygame.draw.polygon(tmp, (*col, al), pts)
             surf.blit(tmp, (x - cam - c0, y - c0))
-        for p in self.parts:
+        for pi, p in enumerate(self.parts):
+            if LO and pi >= 70: break
             a = p.life / p.max; sz = max(1, int(p.size * (0.4 + 0.6 * a)))
-            if p.glow:
+            if p.glow or LO:
                 pygame.draw.circle(surf, p.color, (int(p.x - cam), int(p.y)), sz)
             else:
                 g = pygame.Surface((sz * 2, sz * 2), pygame.SRCALPHA)
@@ -1930,7 +1970,7 @@ class FightScene(Scene):
         self.grade = None
         if g:
             self.grade = pygame.Surface((W, H), pygame.SRCALPHA); self.grade.fill(g)
-        self.lite = IS_ANDROID or bool(settings.get("lite"))
+        self.lite = IS_ANDROID or low() or bool(settings.get("lite"))
         if self.grade is not None and self.lite:
             self.bg = graded_bg(self.ch, self.bg, g); self.grade = None
         self.decor = make_decor(self.ch, self.world_w)
@@ -2255,6 +2295,15 @@ class FightScene(Scene):
     def draw_ult_overlay(self, surf):
         u = self.ult; U = u["U"]; t = u["t"]; ph = u["phase"]; col = U["col"]
         k = ease(t / 18) if ph == 0 else (1.0 if ph in (1, 2) else 1 - ease(t / 20))
+        if low():                                                     # cheap version: black bars + banner only
+            bar_h = int(120 * k)
+            pygame.draw.rect(surf, (0, 0, 0), (0, 0, W, bar_h)); pygame.draw.rect(surf, (0, 0, 0), (0, H - bar_h, W, bar_h))
+            if ph == 0:
+                sl = ease(t / 20); sx = lerp(-900, 0, sl) if t < ULT_T0 - 10 else lerp(0, 1300, ease((t - ULT_T0 + 10) / 10))
+                pygame.draw.rect(surf, tuple(int(c * .6) for c in col), (0, H // 2 - 330, W, 190))
+                text(surf, "ULTIMATE", font(54), WHITE, (W // 2 + sx - 20, H // 2 - 320), "midtop", outline=4)
+                text(surf, U["name"], font(124), WHITE, (W // 2 + sx, H // 2 - 255), "midtop", outline=8)
+            return
         if self.ovl is None: self.ovl = pygame.Surface((W, H), pygame.SRCALPHA)
         o = self.ovl
         dark = int((130 if ph in (0, 1) else 60 if ph == 2 else 40) * k)
@@ -2471,7 +2520,7 @@ class FightScene(Scene):
             text(surf, "YOU ARE  P%d  (%s)" % (me, self.players[me - 1].name), font(40), P_COL[me], (W // 2, 176 if self.vs else 130), "midtop", outline=4,
                  alpha=int(255 * clamp((420 - self.time) / 60.0, 0, 1)))
         if self.net_menu:
-            d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 175)); surf.blit(d, (0, 0))
+            dim(surf, 175)
             text(surf, "LEAVE THE MATCH?", font(100), GOLD, (W // 2, 330), "center", outline=6)
             text(surf, "The game keeps running for your friend", nfont(34, True), WHITE, (W // 2, 440), "center", 3)
             for i, (r, lab) in enumerate(zip(self.pause_rects(), ("STAY", "LEAVE"))):
@@ -2766,7 +2815,8 @@ class FightScene(Scene):
 
     def _draw_scene(self, surf):
         cam = int(self.cam)
-        direct = self.zoom <= 1.004 and not self.fx.shake
+        LO = low()
+        direct = LO or (self.zoom <= 1.004 and not self.fx.shake)
         w = surf if direct else self.world
         w.blit(self.bg, (-cam, 0))
         for dx, ds in self.decor:
@@ -2792,14 +2842,15 @@ class FightScene(Scene):
             surf.blit(self.zbuf, (sx, sy))
         else:
             surf.fill((0, 0, 0)); surf.blit(w, (sx, sy))
-        self.amb_draw(surf)
-        for part, pos in self.vig_parts: surf.blit(part, pos)
-        if self.grade: surf.blit(self.grade, (0, 0))
-        if self.fx.flash > .02:
+        if not LO:
+            self.amb_draw(surf)
+            for part, pos in self.vig_parts: surf.blit(part, pos)
+        if self.grade and not LO: surf.blit(self.grade, (0, 0))
+        if self.fx.flash > .02 and not LO:
             f = self._flash_surf
             if f is None: f = self._flash_surf = pygame.Surface((W, H))
             f.fill(self.fx.flash_color); f.set_alpha(int(255 * min(1, self.fx.flash))); surf.blit(f, (0, 0))
-        if self.player.hp < self.player.maxhp * .25 and self.player.state != "dead":
+        if self.player.hp < self.player.maxhp * .25 and self.player.state != "dead" and not LO:
             a = int(40 + 30 * math.sin(self.time * .15))
             if self._lowhp_surf is None:
                 self._lowhp_surf = pygame.Surface((W, H), pygame.SRCALPHA); pygame.draw.rect(self._lowhp_surf, (255, 0, 0, 255), (0, 0, W, H), 40)
@@ -2896,7 +2947,7 @@ class FightScene(Scene):
             if sub: text(surf, sub, font(60), WHITE, (W // 2, 440), "center", alpha=int(255 * k), outline=4)
 
     def draw_pause(self, surf):
-        d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 175)); surf.blit(d, (0, 0))
+        dim(surf, 175)
         text(surf, "PAUSED", font(100), GOLD, (W // 2, 70), "center", outline=6)
         panel = pygame.Surface((1500, 640), pygame.SRCALPHA); rrect(panel, (20, 16, 30, 230), panel.get_rect(), 24); rrect(panel, GOLD, panel.get_rect(), 24, 3)
         surf.blit(panel, (W // 2 - 750, 170))
@@ -2986,8 +3037,8 @@ class MenuScene(Scene):
             for i in range(4):
                 if self.rect(i).collidepoint(e.pos): self.pick(i)
         elif e.type == pygame.KEYDOWN:
-            if e.key in (pygame.K_UP, pygame.K_w): self.sel = (self.sel - 1) % 4; audio.play("hover", .5)
-            elif e.key in (pygame.K_DOWN, pygame.K_s): self.sel = (self.sel + 1) % 4; audio.play("hover", .5)
+            if e.key in (pygame.K_UP, pygame.K_w): self.sel = (self.sel - 1) % 5; audio.play("hover", .5)
+            elif e.key in (pygame.K_DOWN, pygame.K_s): self.sel = (self.sel + 1) % 5; audio.play("hover", .5)
             elif e.key in (pygame.K_RETURN, pygame.K_SPACE): self.pick(self.sel)
 
     def update(self):
@@ -3014,40 +3065,41 @@ class MenuScene(Scene):
 class OptionsScene(Scene):
     def __init__(self, game):
         super().__init__(game); self.bgimg = bg_cover("menu_play.png"); self.sel = 0; self.t = 0
-        self.rows = ["MUSIC", "EFFECTS", "FULLSCREEN", "BACK"]
+        self.rows = ["MUSIC", "EFFECTS", "FULLSCREEN", "GRAPHICS", "BACK"]
 
-    def rrect_row(self, i): return pygame.Rect(W // 2 - 500, 330 + i * 110, 1000, 84)
+    def rrect_row(self, i): return pygame.Rect(W // 2 - 500, 290 + i * 100, 1000, 80)
 
     def adjust(self, i, d):
         if i == 0: settings["music"] = round(clamp(settings["music"] + d * .1, 0, 1), 2); audio.refresh()
         elif i == 1: settings["sfx"] = round(clamp(settings["sfx"] + d * .1, 0, 1), 2); audio.play("hit")
         elif i == 2 and d: self.game.toggle_fullscreen()
+        elif i == 3 and d: settings["low"] = not settings.get("low", False); audio.play("confirm", .5)
 
     def event(self, e):
         if e.type == pygame.KEYDOWN:
             if e.key == pygame.K_ESCAPE: self.back()
-            elif e.key in (pygame.K_UP, pygame.K_w): self.sel = (self.sel - 1) % 4; audio.play("hover", .5)
-            elif e.key in (pygame.K_DOWN, pygame.K_s): self.sel = (self.sel + 1) % 4; audio.play("hover", .5)
+            elif e.key in (pygame.K_UP, pygame.K_w): self.sel = (self.sel - 1) % 5; audio.play("hover", .5)
+            elif e.key in (pygame.K_DOWN, pygame.K_s): self.sel = (self.sel + 1) % 5; audio.play("hover", .5)
             elif e.key in (pygame.K_LEFT, pygame.K_a): self.adjust(self.sel, -1)
             elif e.key in (pygame.K_RIGHT, pygame.K_d): self.adjust(self.sel, 1)
             elif e.key in (pygame.K_RETURN, pygame.K_SPACE):
-                if self.sel == 2: self.adjust(2, 1)
-                elif self.sel == 3: self.back()
+                if self.sel in (2, 3): self.adjust(self.sel, 1)
+                elif self.sel == 4: self.back()
         elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-            for i in range(4):
+            for i in range(5):
                 r = self.rrect_row(i)
                 if r.collidepoint(e.pos):
                     self.sel = i
                     if i in (0, 1):
                         v = clamp((e.pos[0] - (r.x + 330)) / 600, 0, 1); settings["music" if i == 0 else "sfx"] = round(v, 2); audio.refresh()
-                    elif i == 2: self.adjust(2, 1)
+                    elif i in (2, 3): self.adjust(i, 1)
                     else: self.back()
 
     def back(self):
         save_settings(); audio.play("confirm"); self.game.go(MenuScene(self.game))
 
     def draw(self, surf):
-        surf.blit(self.bgimg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 170)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bgimg, 170)
         text(surf, "OPTIONS", font(110), GOLD, (W // 2, 120), "center", outline=6)
         for i, lab in enumerate(self.rows):
             r = self.rrect_row(i); sel = i == self.sel
@@ -3061,8 +3113,11 @@ class OptionsScene(Scene):
                 text(surf, "%d%%" % int(v * 100), nfont(30, True), WHITE, (r.right - 30, r.centery), "midright")
             elif i == 2:
                 text(surf, "ON" if settings["fullscreen"] else "OFF", font(40), GREEN if settings["fullscreen"] else GREY, (r.x + 330, r.centery), "midleft")
-        text(surf, "F11 also toggles fullscreen anywhere", nfont(28), (210, 200, 230), (W // 2, 800), "center", 2)
-        text(surf, "CONTROLS:  Arrows | SPACE jump x2 | Z light | X heavy | C special | SHIFT dash | R ULTIMATE | UP/DOWN+X combos", nfont(28, True), WHITE, (W // 2, 880), "center", 2)
+            elif i == 3:
+                lo = settings.get("low", False)
+                text(surf, "LOW  (fast)" if lo else "HIGH  (pretty)", font(40), GREEN if lo else ORANGE, (r.x + 330, r.centery), "midleft")
+        text(surf, "LOW = smoother on phones (30 fps drawing, fewer effects)", nfont(28), (210, 200, 230), (W // 2, 880), "center", 2)
+        text(surf, "CONTROLS:  Arrows | SPACE jump x2 | Z light | X heavy | C special | SHIFT dash | R ULTIMATE | UP/DOWN+X combos", nfont(28, True), WHITE, (W // 2, 940), "center", 2)
 
 
 # ==============================================================================================
@@ -3101,7 +3156,7 @@ class AvatarScene(Scene):
             if self.go_t == 70: self.game.after_avatar()
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 110)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 110)
         text(surf, "CHOOSE YOUR HERO", font(100), GOLD, (W // 2, 70), "center", outline=6)
         for i, c in enumerate(self.chars):
             x = self.xs[i]; sel = i == self.sel; an = hero_anim(c, 7.0)
@@ -3158,7 +3213,7 @@ class DialogueScene(Scene):
 
     def draw(self, surf):
         surf.blit(self.bg, (0, 0))
-        if self.overlay: d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, self.overlay)); surf.blit(d, (0, 0))
+        if self.overlay: dim(surf, self.overlay)
         key, name, txt = self.cur() if not self.done else (None, "", "")
         for a in self.actors:
             speaking = a.key == key
@@ -3236,7 +3291,7 @@ class GameOverScene(EndScene):
     def update(self): self.t += 1
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 150)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 150)
         k = clamp(self.t / 25, 0, 1); r = self.ref
         text(surf, "YOU LOST", font(int(190 * (.7 + .3 * k))), (230, 60, 60), (W // 2, 330), "center", alpha=int(255 * k), outline=8)
         text(surf, "Chapter %d: %s" % (r.ch["num"], r.ch["name"]), font(52), WHITE, (W // 2, 500), "center", outline=4)
@@ -3265,7 +3320,7 @@ class ChapterClearScene(EndScene):
             if c[1] > H: c[1] = -10; c[0] = random.uniform(0, W)
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 140)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 140)
         for c in self.conf: pygame.draw.rect(surf, c[3], (int(c[0]), int(c[1]), 10, 16))
         k = clamp(self.t / 25, 0, 1); r = self.ref
         text(surf, "CHAPTER %d CLEARED!" % self.ch["num"], font(int(150 * (.7 + .3 * k))), GOLD, (W // 2, 170), "center", alpha=int(255 * k), outline=8)
@@ -3315,7 +3370,7 @@ class ChapterSelectScene(Scene):
     def update(self): self.t += 1
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 160)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 160)
         text(surf, "SELECT CHAPTER", font(100), GOLD, (W // 2, 120), "center", outline=6)
         for i, ch in enumerate(CHAPTERS):
             r = self.rect(i); sel = i == self.sel; lock = i >= self.unlocked
@@ -3359,7 +3414,7 @@ class VictoryScene(EndScene):
             if c[1] > H: c[1] = -10; c[0] = random.uniform(0, W)
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 100)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 100)
         for c in self.conf: pygame.draw.rect(surf, c[3], (int(c[0]), int(c[1]), 10, 16))
         k = clamp(self.t / 25, 0, 1)
         text(surf, "VICTORY!", font(int(200 * (.7 + .3 * k))), GOLD, (W // 2, 190), "center", alpha=int(255 * k), outline=8)
@@ -3455,7 +3510,7 @@ class MPCharScene(Scene):
         else: self.go_t = 0
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 120)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 120)
         text(surf, "2 PLAYERS  -  CHOOSE YOUR HEROES", font(90), GOLD, (W // 2, 60), "center", outline=6)
         for i, c in enumerate(self.chars):
             x = self.xs[i]; on = i in self.sel or i in self.lock; an = hero_anim(c, 7.0)
@@ -3504,7 +3559,7 @@ class MPMenuScene(Scene):
 
     def draw(self, surf):
         surf.blit(pygame.transform.smoothscale(self.bg, (W, H)) if self.bg.get_size() != (W, H) else self.bg, (0, 0))
-        d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 165)); surf.blit(d, (0, 0))
+        dim(surf, 165)
         text(surf, self.title, font(96 if len(self.title) < 22 else 70), GOLD, (W // 2, 120), "center", outline=6)
         if self.sub: text(surf, self.sub, font(46), WHITE, (W // 2, 230), "center", outline=4)
         for i, (lab, desc, _) in enumerate(self.options):
@@ -3541,7 +3596,7 @@ class VSResultScene(EndScene):
     def update(self): self.t += 1
 
     def draw(self, surf):
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 150)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 150)
         k = clamp(self.t / 25, 0, 1); r = self.ref; p = r.players[self.w]; col = P_COL[self.w + 1]
         text(surf, "PLAYER %d WINS!" % (self.w + 1), font(int(170 * (.7 + .3 * k))), col, (W // 2, 230), "center", alpha=int(255 * k), outline=8)
         text(surf, p.name, font(80), WHITE, (W // 2, 380), "center", outline=5)
@@ -3571,13 +3626,14 @@ class PrizeScene(EndScene):
 
     def draw(self, surf):
         t = self.t; r = self.ref; win = r.players[self.w]; lose = r.players[1 - self.w]; col = P_COL[self.w + 1]
-        surf.blit(self.bg, (0, 0)); d = pygame.Surface((W, H), pygame.SRCALPHA); d.fill((0, 0, 0, 170)); surf.blit(d, (0, 0))
+        bg_dim(surf, self.bg, 170)
         cx, cy = W // 2, 470
-        rays = pygame.Surface((W, H), pygame.SRCALPHA)                  # rotating light beams
-        for i in range(12):
-            a = t * .008 + i * math.tau / 12
-            pygame.draw.polygon(rays, (255, 190, 70, 34), [(cx, cy), (cx + math.cos(a - .06) * 1700, cy + math.sin(a - .06) * 1700), (cx + math.cos(a + .06) * 1700, cy + math.sin(a + .06) * 1700)])
-        surf.blit(rays, (0, 0))
+        if not low():
+            rays = pygame.Surface((W, H), pygame.SRCALPHA)              # rotating light beams
+            for i in range(12):
+                a = t * .008 + i * math.tau / 12
+                pygame.draw.polygon(rays, (255, 190, 70, 34), [(cx, cy), (cx + math.cos(a - .06) * 1700, cy + math.sin(a - .06) * 1700), (cx + math.cos(a + .06) * 1700, cy + math.sin(a + .06) * 1700)])
+            surf.blit(rays, (0, 0))
         g = glow_disc(430 + 30 * math.sin(t * .08), (255, 110, 20), 1.6)
         surf.blit(g, (cx - g.get_width() // 2, cy - g.get_height() // 2), special_flags=pygame.BLEND_RGB_ADD)
         for c in self.conf: pygame.draw.rect(surf, c[3], (int(c[0]), int(c[1]), 10, 16))
@@ -3775,7 +3831,7 @@ class Game:
 
     # -- loop -------------------------------------------------------------------------------
     def run(self):
-        STEP = 1.0 / FPS; acc = 0.0; last = time.perf_counter()
+        STEP = 1.0 / FPS; acc = 0.0; last = time.perf_counter(); self.loop_i = 0
         while True:
             for e in pygame.event.get():
                 if e.type == pygame.QUIT: save_settings(); pygame.quit(); sys.exit()
@@ -3790,8 +3846,10 @@ class Game:
                 self.tick(); acc -= STEP; n += 1
             if acc >= STEP: acc = 0.0                          # still behind: give up catching up
             if n == 0: self.tick(); acc = 0.0
-            self.render(screen)
-            present(screen); clock.tick(FPS)
+            self.loop_i += 1
+            if not low() or self.loop_i % 2 == 0:
+                self.render(screen); present(screen)
+            clock.tick(FPS)
 
     def android_event(self, e):
         """Touch -> game coordinates, plus mouse emulation so every menu works with a finger.
